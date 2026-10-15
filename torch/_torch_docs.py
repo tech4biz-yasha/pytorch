@@ -10166,6 +10166,11 @@ Returns ``True`` if your system supports flushing denormal numbers and it
 successfully configures flush denormal mode.  :meth:`~torch.set_flush_denormal`
 is supported on x86 architectures supporting SSE3 and AArch64 architecture.
 
+.. note::
+    Some CPU instructions ignore this setting. For example, BF16 matrix
+    multiplications that run on Intel AMX always treat denormal inputs as
+    zero. See :ref:`bf16_on_intel_amx` in the numerical accuracy notes.
+
 Args:
     mode (bool): Controls whether to enable flush denormal mode or not
 
