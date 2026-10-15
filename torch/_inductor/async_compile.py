@@ -301,8 +301,11 @@ class AsyncCompile:
         return ThreadPoolExecutor(get_compile_threads())
 
     @classmethod
-    def drain_pending(cls, timeout: float | None = 600) -> None:
-        """Wait for all submitted compile work, then shut down the compile workers.
+    def drain_pending(
+        cls, timeout: float | None = 600, *, shutdown: bool = True
+    ) -> None:
+        """Wait for all submitted compile work, then, unless ``shutdown=False``,
+        shut down the compile workers.
 
         Call this only after submissions have stopped. It first waits on every
         cached Triton kernel future (running its result callback), the worker
@@ -312,7 +315,8 @@ class AsyncCompile:
         its error. Either error propagates before anything is shut down, so the
         pools and compile workers stay usable. Thread pools and a non-subprocess
         process pool expose no pending work to wait on, so the shutdown that
-        follows joins them without the ``timeout`` bound.
+        follows joins them without the ``timeout`` bound. ``shutdown=False``
+        only waits, leaving the pools and compile workers running.
         """
         deadline = None if timeout is None else time() + timeout
 
@@ -327,6 +331,8 @@ class AsyncCompile:
         for pool in list(_pool_set):
             if isinstance(pool, SubprocPool):
                 pool.drain_pending(timeout=remaining())
+        if not shutdown:
+            return
         if cls.pool.cache_info().currsize:
             cls.pool().shutdown(wait=True)
             cls.pool.cache_clear()
