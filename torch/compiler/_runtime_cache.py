@@ -17,7 +17,7 @@ import tempfile
 import threading
 import types
 from pathlib import Path
-from typing import cast, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 from torch.compiler._cache import (
     _serialize_single_cache,
@@ -35,8 +35,6 @@ log = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from types import ModuleType
-
-    from triton.runtime.autotuner import Autotuner
 
     from torch._inductor.runtime.triton_heuristics import (
         CachingAutotuner,
@@ -82,11 +80,16 @@ def _private_directory(prefix: str) -> str:
     return directory
 
 
-def _live_autotuners() -> list[Autotuner]:
-    from triton.runtime.autotuner import Autotuner
-
-    # type() rather than isinstance(): some module objects warn on __class__.
-    return [obj for obj in gc.get_objects() if issubclass(type(obj), Autotuner)]
+def _live_objects(*kinds: type) -> list[list[Any]]:
+    """The gc-tracked objects of each of kinds, in one walk of the heap."""
+    live: list[list[Any]] = [[] for _ in kinds]
+    for obj in gc.get_objects():
+        # type() rather than isinstance(): some module objects warn on __class__.
+        cls = type(obj)
+        for found, kind in zip(live, kinds):
+            if issubclass(cls, kind):
+                found.append(obj)
+    return live
 
 
 def _importable(root: Path, digest: str) -> bool:
@@ -112,6 +115,7 @@ def _serving_triton_root(cache: ModuleType, digest: str) -> str:
     reading the imported decisions.
     """
     from triton import knobs
+    from triton.runtime.autotuner import Autotuner
 
     configured = os.environ.get("TRITON_CACHE_DIR")
     if configured is None or not _importable(Path(configured), digest):
@@ -122,7 +126,8 @@ def _serving_triton_root(cache: ModuleType, digest: str) -> str:
     # outlive any later TRITON_CACHE_DIR.
     del knobs.cache.dir
     knobs.autotuning.cache = True
-    for tuner in _live_autotuners():
+    [tuners] = _live_objects(Autotuner)
+    for tuner in tuners:
         tuner.cache_results = not knobs.runtime.interpret
     return str(cache.runtime_cache_root())
 
@@ -525,13 +530,18 @@ def _own_triton_cache(settings: contextlib.ExitStack) -> str | None:
     until ``settings`` closes, so the directory holds exactly the Triton JIT
     kernels and autotuning decisions the scope used.
 
-    Autotuners fix cache_results when they are decorated, so existing ones are
-    switched on for the scope too.
+    JIT functions and autotuners from before the scope keep compiled kernels
+    and decisions in memory, which a launch in the scope would reuse without
+    touching the directory, so those are dropped and produced again on first
+    use. Autotuners fix cache_results when they are decorated, so existing
+    ones are switched on for the scope too.
     """
     if _triton_runtime_cache() is None:
         return None
     from triton import knobs
     from triton.runtime import driver
+    from triton.runtime.autotuner import Autotuner
+    from triton.runtime.jit import JITFunction
 
     root = _private_directory("torch_precompile_triton_")
     # Triton builds its driver's utility module (cuda_utils, hip_utils) into
@@ -551,9 +561,16 @@ def _own_triton_cache(settings: contextlib.ExitStack) -> str | None:
     settings.enter_context(knobs.autotuning.scope())
     knobs.cache.dir = root
     knobs.autotuning.cache = True
-    tuners = _live_autotuners()
+    jit_functions, tuners = _live_objects(JITFunction, Autotuner)
+    for fn in jit_functions:
+        fn.device_caches.clear()
     restore = [(tuner, tuner.cache_results) for tuner in tuners]
     for tuner in tuners:
+        # Triton never writes a decision to disk when a config it tuned among
+        # has a pre_hook, so dropping it would only benchmark again.
+        unpruned = not (tuner.early_config_prune or tuner.perf_model)
+        if not (unpruned and any(config.pre_hook for config in tuner.configs)):
+            tuner.cache.clear()
         tuner.cache_results = not knobs.runtime.interpret
 
     def restore_cache_results() -> None:
