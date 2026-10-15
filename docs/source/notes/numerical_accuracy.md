@@ -230,6 +230,20 @@ The following is the list of operations where MIOpen may be used:
   - `ConvBackend::MiopenDepthwise`
   - `ConvBackend::MiopenTranspose`
 
+(bf16_on_intel_amx)=
+
+## BF16 Matrix Multiplications on Intel CPUs with AMX
+
+On Intel CPUs with AMX-BF16, for example 4th Gen Xeon Scalable processors, BF16 matrix
+multiplications that PyTorch dispatches to oneDNN run on AMX instructions, which treat
+denormal inputs as zero and flush denormal outputs to zero regardless of the flush-to-zero
+and denormals-are-zero settings. `torch.set_flush_denormal(False)` does not change this.
+
+PyTorch dispatches a BF16 matrix multiplication to oneDNN only when `m * k * n` is larger
+than `16 * 16 * 16`. Smaller products run in PyTorch's own CPU kernel, which does not flush
+denormals by default, so the same denormal inputs can give a non-zero result in a small
+matrix multiplication and zero in a larger one on the same machine.
+
 (tf32_on_mi300)=
 
 ## TensorFloat-32 (TF32) on AMD Instinct MI300 devices
